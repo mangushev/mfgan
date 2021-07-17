@@ -1,7 +1,7 @@
 # mfgan
 Implementation of MFGAN: Sequential Recommendation with Self-Attentive Multi-Adversarial Network
 
-This is a work in progress. It trains. I have not validatd all of this and have not built evaluation. 
+This is a work in progress. It trains. I have not validatd all of this and have not built evaluation yet. 
 
 article: https://arxiv.org/abs/2005.10602
 
@@ -29,7 +29,9 @@ Training sequence is in the article:
 TO-DO and notices:
 
 - I don't get it why input sequence should be right aligned, why not to mask if input sequence is short
-- Build evaluation
+- I don't like training losses outputs, need to evaluate
+- Training epochs in the article do not much how it actually takes. It is much less
+- Build evaluation/performance
 - I don't like how it converges! See graths.
 
 Training steps:
