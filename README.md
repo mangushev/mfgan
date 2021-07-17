@@ -29,7 +29,6 @@ Training sequence is in the article:
 TO-DO and notices:
 
 - I don't get it why input sequence should be right aligned, why not to mask if input sequence is short
-- I don't like training losses outputs, need to evaluate
 - Training epochs in the article do not much how it actually takes. It is much less
 - Build evaluation/performance
 - I don't like how it converges! See graths.
