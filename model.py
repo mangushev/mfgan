@@ -1,10 +1,9 @@
 
 #TODO:
 #attention masks - encoder, mask future "next items"
-#input is onehot maybe: B, n, I 
 #how many layers in discriminator MLP
-
 #layer normalization - replace keras, can new tfa
+#review tf.gather
 
 import tensorflow as tf
 import tensorflow_probability as tfp
@@ -545,9 +544,9 @@ def transformer_model(input_tensor,
     final_output = reshape_from_matrix(prev_output, input_shape)
     return final_output
 
-def Discriminator(input_tensor, num_hidden_layers, num_items, hidden_size, batch_size, max_seq_length, num_attention_heads, activation_fn, initializer_range, factor_id, dropout_prob=0.1):
+def Discriminator(input_tensor, num_hidden_layers, num_items, hidden_size, batch_size, max_seq_length, num_attention_heads, activation_fn, initializer_range, factor_id, dropout_prob=0.2):
 
-  #1). discriminator embedding table: [I/V, d/E] so like this [num_items, hidden_size]
+  #1). discriminator embedding table: [I, d] so like this [num_items, hidden size]
   #lookup in embeddings table to find entry for item
   with tf.compat.v1.variable_scope("input_embeddings"):
     #[I, d]
@@ -574,7 +573,7 @@ def Discriminator(input_tensor, num_hidden_layers, num_items, hidden_size, batch
     position_table = tf.compat.v1.get_variable(initializer=create_initializer(initializer_range), 
           shape=[max_seq_length, hidden_size], name='position_table')
   
-    #[B, n, d] + [0, n, d] --> [B, n, d]
+    #[B, n, d] + [0, n, d] --> [B n, d]
     embedding_with_positions = embedding + tf.expand_dims(position_table, 0)
 
     #self._generator_embedding_with_positions = tf.Print(_generator_embedding_with_positions, [_generator_embedding_with_positions], "_generator_embedding_with_positions", summarize=8)
@@ -593,29 +592,58 @@ def Discriminator(input_tensor, num_hidden_layers, num_items, hidden_size, batch
                         initializer_range=0.02,
                         do_return_all_layers=False)
   #4) MLP
-  #[B, n+1, d] --> [B, d]
-  last_item  = discriminator_tensor[:,-2,:]
+
+#    #4). three fully connected layers
+#    #[A, k1] --> [A, k2]
+#    with tf.variable_scope("layer_3fc"):
+#      layer_output = final_gru_output
+#      for i in range(3):
+#        with tf.variable_scope("fc_%d" %i):
+#          layer_output = dense_layer(layer_output, k2, activation=None, initializer=create_initializer(initializer_range))
+#          #layer_output = layer_norm(layer_output)
+#          layer_output = tf.nn.relu(layer_output)
+#          layer_output = dropout(layer_output, dropout_prob)
+
+#    #[A, k2] --> [A, m]
+#    self._next_feature= dense_layer(layer_output, num_features, activation=None, initializer=create_initializer(initializer_range))
 
   #[B, d] --> [B, 1]
-  factor = dense_layer(last_item, 1, activation=tf.math.sigmoid, initializer=create_initializer(initializer_range), name="factor")
+  factor = dense_layer(discriminator_tensor[:,-2,:], 1, activation=tf.math.sigmoid, initializer=create_initializer(initializer_range), name="factor")
 
-  return factor
+  #[B, 1] --> [B]
+  return tf.squeeze(factor, axis=-1, name='factor_squeeze')
 
+def calculate_rewards(factors, factor_bin_sizes, discriminator_hidden_layers, num_items, hidden_size, batch_size, max_seq_length, num_attention_heads, activation_fn, initializer_range, name='rewards', dropout_prob=0.2):
+  with tf.compat.v1.variable_scope(name):
+    #[B, f, n]
+    factors_shape = get_shape_list(factors, expected_rank=3)
+    num_factors = factors_shape[1]
+
+    rewards = tf.TensorArray(size=num_factors, dtype=tf.float32, name="factors")
+    #[B, n, I]
+    for i in range(num_factors):
+      with tf.variable_scope("unit_index_%d" %i):
+        #[B, f, n] --> [B, n] --> [B, n, f_len]
+        factor = tf.one_hot(factors[:,i,:], factor_bin_sizes[i], axis=-1)
+        rewards = rewards.write(i, Discriminator(factor, discriminator_hidden_layers, num_items, hidden_size, batch_size, max_seq_length, num_attention_heads, activation_fn, initializer_range, i, dropout_prob=dropout_prob))
+
+  #[B] x factors --> [f, B] --> [B, f] --> [B]
+  return tf.math.reduce_mean(tf.transpose(rewards.stack(), [1,0]), axis=-1, keepdims=False)
 
 class MfGAN(object):
   #   B = batch size (number of sequences)
-  #   n/F = `from_tensor` sequence of historical interactions
+  #   n = `from_tensor` sequence of historical interactions
   #   T = `to_tensor` sequence length in frames
-  #   I/V - number of items/alphabet size
-  #   d/E - d-dimentional dense representation/embeddings, hidden size
-  #   D - duration embeddings, hidden size
-  #   M - number of mel buckets in final spectrogram
+  #   I - number of items
+  #   d - d-dimentional dense representation/embeddings, hidden size
   #   f - number of factors
   def __init__(self,
                input_dense,
                factors,
+               products,
                num_items,
                factor_bin_sizes,
+               predictive_position=2,
                hidden_size=50,
                generator_hidden_layers=2,
                discriminator_hidden_layers=1,
@@ -623,29 +651,33 @@ class MfGAN(object):
                initializer_range=0.02,
                activation_fn=tf.nn.relu,
                dropout_prob=0.2,
-               use_generator=True,
                is_training=True):
-
     #dense input
     #[B, n]
     input_shape = get_shape_list(input_dense, expected_rank=2)
     batch_size = input_shape[0]
     max_seq_length = input_shape[1]
-  
-    #[B, f, n]
-    factors_shape = get_shape_list(factors, expected_rank=3)
-    num_factors = factors_shape[1]
+
+    if is_training == False:
+       dropout_prob = 0.0
+
+    #add item ids as factors
+    #[B, f-1, n] --> [B, f, n]
+    factors = tf.concat([tf.expand_dims(input_dense, 1), factors], axis=1)
+
+    #and adjust bin sizes
+    #[B, f-1] --> [B, f]
+    factor_bin_sizes = tf.concat([[num_items], factor_bin_sizes], axis=0)
 
     #input as onehot
     #[B, n, I]
     input_tensor = tf.one_hot(input_dense, num_items, axis=-1)
 
-    input_masks = tf.concat([tf.ones([batch_size, max_seq_length-2], tf.int32), tf.zeros([batch_size, 2], tf.int32)], axis=1)    
+    #[B, n]
+    input_masks = tf.concat([tf.ones([batch_size, max_seq_length-predictive_position], tf.int32), tf.zeros([batch_size, predictive_position], tf.int32)], axis=1)    
     #input_t = tf.Print(input_tensor, [input_tensor], "input_tensor", summarize=100)
-    if is_training == False:
-       dropout_prob = 0.0
 
-    #1). generator embedding table: [I/V, d/E] so like this [number_of_items/alphabet_size, embeddings_size/hidden_size]
+    #1). generator embedding table: [I, d] so like this [number_of_items, hidden_size]
     #lookup in embeddings table to find entry for item
     with tf.compat.v1.variable_scope("input_embeddings"):
       #[I, d]
@@ -662,7 +694,6 @@ class MfGAN(object):
       #input_dense = tf.argmax(input_tensor, axis=2)
 
       #[B, I, d] --> [B, n, d]
-      #indices[117,14] = 3533 is not in [0, 20)
       self._generator_embedding = tf.gather(generator_embedding_expanded, input_dense, axis=1, batch_dims=1, name="generator_embedding")
 
     #self._generator_embedding = tf.Print(_generator_embedding, [self._generator_embedding_table[0], self._generator_embedding_table[1], self._generator_embedding_table[2], self._generator_embedding_table[3], self._generator_embedding_table[4], self._generator_embedding_table[5], self._generator_embedding_table[6], _generator_embedding], "_generator_embedding", summarize=8)
@@ -684,8 +715,6 @@ class MfGAN(object):
   
     #4). generator block
     with tf.compat.v1.variable_scope("generator_block"):
-      encoder_dropout_prob = dropout_prob
-      
       self._generator_tensor = transformer_model(self._generator_embedding_with_positions,
                         attention_mask=attention_mask,
                         hidden_size=hidden_size,
@@ -693,47 +722,62 @@ class MfGAN(object):
                         num_attention_heads=num_attention_heads,
                         intermediate_size=hidden_size,
                         intermediate_act_fn=activation_fn,
-                        hidden_dropout_prob=encoder_dropout_prob,
-                        attention_probs_dropout_prob=encoder_dropout_prob,
+                        hidden_dropout_prob=dropout_prob,
+                        attention_probs_dropout_prob=dropout_prob,
                         initializer_range=0.02,
                         do_return_all_layers=False)
   
     #5) Predection Layer
     with tf.compat.v1.variable_scope("prediction_layer"):
       #[B, n, d] --> [B, d]
-      new_item  = self._generator_tensor[:,-2,:]
+      new_item  = self._generator_tensor[:,-predictive_position,:]
       #[B, d] . [I, d]T --> [B, I] - this is onehot for next item
       next_item = tf.nn.softmax(tf.matmul(new_item, self._generator_embedding_table, transpose_b=True, name='next_item'))
-      self._generated_sample = tf.concat([input_tensor[:,:-2,:], tf.expand_dims(next_item, axis=1), tf.zeros([batch_size, 1, num_items])], axis=1)
 
-    #6) Factors loop
+      #[B, n, I] --> [B, n, I]
+      self._generated_sample = tf.cond(tf.math.equal(predictive_position, 2), 
+        lambda: tf.concat([input_tensor[:,:-2,:], tf.expand_dims(next_item, axis=1), input_tensor[:,-1:,:]], axis=1),
+        lambda: tf.concat([input_tensor[:,:-1,:], tf.expand_dims(next_item, axis=1)], axis=1))
+
+    #6) Factors loop and Q function, lambda = 0 --> taking mean of factors
     with tf.compat.v1.variable_scope("discriminator"):
-      sample = tf.cond(tf.math.equal(use_generator, True), lambda: self._generated_sample, lambda: input_tensor)
-      rewards = tf.TensorArray(size=num_factors, dtype=tf.float32, name="factors")
-      #[B, n, I]
-      for i in range(num_factors):
-        with tf.variable_scope("unit_index_%d" %i):
-          #[B, f, n] --> [B, n] --> [B, n, f_len]
-          factor = tf.one_hot(factors[:,i,:], factor_bin_sizes[i], axis=-1)
-          rewards = rewards.write(i, Discriminator(factor, discriminator_hidden_layers, num_items, hidden_size, batch_size, max_seq_length, num_attention_heads, activation_fn, initializer_range, i, dropout_prob=0.1))
+      #[B, I] --> [B, 1]
+      next_item_dense = tf.expand_dims(tf.argmax(next_item, axis=1), axis=-1)
 
-    #7) Q function, lambda = 0 --> taking mean of factors
-    #[B, 1] x factors --> [f, B, d] --> [B, 1]
-    self._Q = tf.math.reduce_mean(tf.transpose(rewards.stack(), [1,2,0]), axis=-1, keepdims=False)
-    #self._Q = tf.reduce_mean(factors.stack())
+      #[B, I, f], [B, 1] --> [B, 1, f]
+      next_factors = tf.gather(products, next_item_dense, axis=1, batch_dims=1, name="next_factors")
 
-    #8) log G to calculate gradients
-    # reset to zero all except "right" class
-    actual_item = input_tensor[:,-2,:]
-    self._log_G = tf.math.log(next_item)*actual_item
-    
+      #[B, 1] + [B, 1, f-1] --> [B, 1, 1] + [B, 1, f-1] --> [B, 1, f]
+      next_factors = tf.concat([tf.cast(tf.expand_dims(next_item_dense, axis=1), dtype=tf.int32), next_factors], axis=-1)      
+
+      #factors are not used for prediction or testing and, for training, it is always the one before the last
+      #[B, f, n] --> [B, f, n]
+      generated_factors = tf.concat([factors[:,:,:-2], tf.transpose(next_factors, [0,2,1]), factors[:,:,-1:]], axis=-1)
+     
+      #Discriminator value from input
+      #[B]
+      self._input_item_Q = calculate_rewards(factors, factor_bin_sizes, discriminator_hidden_layers, num_items, hidden_size, batch_size, max_seq_length, num_attention_heads, activation_fn, initializer_range, name="based_on_input", dropout_prob=dropout_prob)
+
+      #Discriminator value from generator
+      #[B]
+      self._generated_item_Q = calculate_rewards(generated_factors, factor_bin_sizes, discriminator_hidden_layers, num_items, hidden_size, batch_size, max_seq_length, num_attention_heads, activation_fn, initializer_range, name="from_generator", dropout_prob=dropout_prob)
+
+    #7) log G to calculate gradients
+    #[B, I]
+    # mask all except one by multiplying on onehot label
+    self._log_G = tf.math.log(next_item)*input_tensor[:,-2,:]
+
   @property
   def generated_sample(self):
     return tf.argmax(self._generated_sample, axis=2)
 
   @property
-  def Q(self):
-    return self._Q
+  def Input_item_Q(self):
+    return self._input_item_Q
+
+  @property
+  def Generated_item_Q(self):
+    return self._generated_item_Q
 
   @property
   def log_G(self):

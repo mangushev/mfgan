@@ -6,9 +6,8 @@ import numpy as np
 import os
 import argparse
 import sys
-import random
+#import random
 import logging
-import librosa
 
 FLAGS = None
 
@@ -21,16 +20,17 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.propagate = False
 
-def audio_example(input, factors, is_real_example):
+def example(input, factors, products, is_real_example):
     record = {
         'input': tf.train.Feature(int64_list=tf.train.Int64List(value=input)),
         'factors': tf.train.Feature(int64_list=tf.train.Int64List(value=np.reshape(factors, [-1]))),
+        'products': tf.train.Feature(int64_list=tf.train.Int64List(value=np.reshape(products, [-1]))),
         'is_real_example': tf.train.Feature(int64_list=tf.train.Int64List(value=[int(is_real_example)]))
     }
 
     return tf.train.Example(features=tf.train.Features(feature=record))
 
-def create_records_0(reviews_file, games_file, tfrecords_file):
+def create_records(reviews_file, games_file, tfrecords_file):
 
   import json
   import ast
@@ -41,8 +41,6 @@ def create_records_0(reviews_file, games_file, tfrecords_file):
   import itertools
   
   games = {}  
-  sentiments = {}  
-  developers = {}  
 
   with open(games_file, encoding='utf8') as f:
     pattern = re.compile('\d+.?\d*')
@@ -59,8 +57,6 @@ def create_records_0(reviews_file, games_file, tfrecords_file):
         sentiment = 'UNKNOWN'
       else:
         sentiment = game['sentiment']
-      if not sentiment in sentiments:
-        sentiments[sentiment] = len(sentiments)+1
 
       if not 'price' in game:
         price = -1.0
@@ -90,10 +86,8 @@ def create_records_0(reviews_file, games_file, tfrecords_file):
         developer = 'UNKNOWN'
       else:
         developer = game['developer']
-      if not developer in developers:
-        developers[developer] = len(developers)+1
 
-      games[game['id']] = {'popularity': sentiments[sentiment], 'price':price, 'developer':developers[developer]}
+      games[game['id']] = (sentiment, price, developer)
 
   users = {}
   interaction = []
@@ -103,7 +97,7 @@ def create_records_0(reviews_file, games_file, tfrecords_file):
       review = ast.literal_eval(line)
 
       if not review['username'] in users:
-        users[review['username']] = len(users)+1
+        users[review['username']] = len(users)
 
       user_id = users[review['username']]
 
@@ -149,13 +143,22 @@ def create_records_0(reviews_file, games_file, tfrecords_file):
 
   interacted_games = [k for k, g in itertools.groupby(core_interaction, key=operator.itemgetter(1))]
 
+  print ("interacted_games: ", len(interacted_games))
+
+  sentiments = {}  
+  developers = {}  
+
   products = {}
   product_list = []
   i = 0
-  for k in games:
+  for k, v in games.items():
     if k in interacted_games:
-      products[k] = (i, sentiments[sentiment], price, developers[developer])
-      product_list.append((sentiments[sentiment], price, developers[developer]))
+      if not v[0] in sentiments:
+        sentiments[v[0]] = len(sentiments)
+      if not v[2] in developers:
+        developers[v[2]] = len(developers)
+      products[k] = (i, sentiments[v[0]], v[1], developers[v[2]])
+      product_list.append((sentiments[v[0]], v[1], developers[v[2]]))
       i = i + 1
 
   import pickle
@@ -163,15 +166,23 @@ def create_records_0(reviews_file, games_file, tfrecords_file):
   pickle.dump(product_list, f)
   f.close()
 
+  product_table = np.array(product_list)
+
   print ("num_sentiment", len(sentiments))
+  #for k, v in sentiments.items():
+  #  print (k, v)
+  print (sentiments)
   print ("num_price", 6)
   print ("num_developer", len(developers))
+  #for k, v in developers.items():
+  #  print (k, v)
+  print (developers)
   print ("num_items", len(products))
-
-  return
+  print (products)
 
   sorted_interaction = sorted(core_interaction, key=operator.itemgetter(0, 2))
 
+  # item[1] is real_product_id
   interaction = []
   for item in sorted_interaction:
     interaction.append((item[0], products[item[1]][0], products[item[1]][1], products[item[1]][2], products[item[1]][3]))
@@ -186,7 +197,7 @@ def create_records_0(reviews_file, games_file, tfrecords_file):
       interation_lengths.append(input_tensor.shape[0])
 
       #print (factors)
-      print (factors.shape)
+      #print (factors.shape)
 
       if (input_tensor.shape[0]<FLAGS.max_seq_length):
         input_tensor = np.concatenate((np.zeros((FLAGS.max_seq_length-input_tensor.shape[0]), dtype=int), input_tensor),axis=0)
@@ -195,47 +206,30 @@ def create_records_0(reviews_file, games_file, tfrecords_file):
         input_tensor = input_tensor[input_tensor.shape[0]-FLAGS.max_seq_length:]
         factors = factors[:, factors.shape[1]-FLAGS.max_seq_length:]
 
-      print (input_tensor.shape)
+      #print (input_tensor.shape)
       #print (factors)
-      print (factors.shape)
+      #print (factors.shape)
 
-      tf_example = audio_example(input_tensor, factors, True)
-      #tf_example = audio_example(name, input_tensor, len(transcript), input_mask, input_durations, mel, mel_len)
+      tf_example = example(input_tensor, factors, product_table, True)
 
       writer.write(tf_example.SerializeToString())
 
   print ("min/max/mean: ", np.min(interation_lengths), np.max(interation_lengths), np.mean(interation_lengths))
 
 def main():
-    #record_count, input_long_count, mel_long_count, max_input_len, max_mel_len = create_records(FLAGS.metadata_file, FLAGS.audio_files, FLAGS.durations_file, FLAGS.tfrecords_file)
-
-    create_records_0(FLAGS.activity, FLAGS.items, FLAGS.tfrecords_file)
-
-    #logging.info ("record_count {} inputr_long {} label_long {} max_input_len {} max_mel_len {}".format(record_count, input_long_count, mel_long_count, max_input_len, max_mel_len))
+    create_records(FLAGS.activity, FLAGS.items, FLAGS.tfrecords_file)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--sample_rate', type=int, default=22050,
-            help='Signal will be resampled to this rate.')
-    parser.add_argument('--num_mels', type=int, default=80,
-            help='This is number of mel filter banks as per Deep Speech 1 article.')
-    parser.add_argument('--winlen', type=float, default=0.020,
-            help='Audio frame window size as per Deep Speech 1 article.')
-    parser.add_argument('--winstep', type=float, default=0.010,
-            help='Audio frame sliding as per Deep Speech 1 article.')
     parser.add_argument('--max_seq_length', type=int, default=20,
-            help='Max length of output strings in characters will shorter strings filled with zeros.')
+            help='Max number of items in a sequence.')
     parser.add_argument('--logging', default='INFO', choices=['DEBUG','INFO','WARNING','ERROR','CRITICAL'],
             help='Enable excessive variables screen outputs.')
     parser.add_argument('--activity', type=str, default='/work/datasets/Steam_Games/steam_reviews.json',
-            help='Location of specific unzipped Libri file collectiob.')
+            help='Data with customer activity.')
     parser.add_argument('--items', type=str, default='/work/datasets/Steam_Games/steam_games.json',
-            help='Location of specific unzipped Libri file collectiob.')
-    parser.add_argument('--durations_file', type=str, default=None,
-            help='Location of specific unzipped Libri file collectiob.')
-    parser.add_argument('--audio_files', type=str, default=None,
-            help='Location of specific unzipped Libri file collectiob.')
+            help='Gates data with factor information.')
     parser.add_argument('--tfrecords_file', type=str, default='data/{}.tfrecords',
             help='tfrecords output file. It will be used as a prefix if split.')
 
@@ -246,4 +240,3 @@ if __name__ == '__main__':
     logger.debug ("Running with parameters: {}".format(FLAGS))
 
     main()
-

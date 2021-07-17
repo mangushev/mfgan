@@ -1,4 +1,8 @@
 
+#TODO
+#number of attention heads?
+#input buffer tuning
+
 import numpy as np
 np.set_printoptions(edgeitems=25, linewidth=10000, precision=4, suppress=True)
 
@@ -10,47 +14,36 @@ import os
 import pickle
 import tensorflow as tf
 
-from prepare_data import audio_example
+from prepare_data import example
 from model import MfGAN, get_shape_list
 
 FLAGS = None
 
-def make_input_fn_(filename, is_training, drop_reminder):
-  """Returns an `input_fn` for train and eval."""
+def get_assignment_map_from_checkpoint(tvars, init_checkpoint):
+  """Compute the union of the current variables and checkpoint variables."""
+  assignment_map = {}
+  initialized_variable_names = {}
 
-  def input_fn(params):
-    def parser(serialized_example):
-      example = tf.io.parse_single_example(
-          serialized_example,
-          features={
-              "input": tf.io.FixedLenFeature([FLAGS.max_seq_length], tf.int64),
-              "factors": tf.io.FixedLenFeature([FLAGS.num_factors, FLAGS.max_seq_length], tf.int64),
-              "is_real_example": tf.io.FixedLenFeature((), tf.int64),
-          })
-      
-      for name in list(example.keys()):
-        t = example[name]
-        if t.dtype == tf.int64:
-          t = tf.to_int32(t)
-        example[name] = t
+  name_to_variable = collections.OrderedDict()
+  for var in tvars:
+    name = var.name
+    m = re.match("^(.*):\\d+$", name)
+    if m is not None:
+      name = m.group(1)
+    name_to_variable[name] = var
 
-      return example
+  init_vars = tf.train.list_variables(init_checkpoint)
 
-    dataset = tf.data.TFRecordDataset(
-      filename, buffer_size=FLAGS.dataset_reader_buffer_size)
-    
-    if is_training:
-      dataset = dataset.repeat()
-      dataset = dataset.shuffle(buffer_size=FLAGS.shuffle_buffer_size, reshuffle_each_iteration=True)
+  assignment_map = collections.OrderedDict()
+  for x in init_vars:
+    (name, var) = (x[0], x[1])
+    if name not in name_to_variable:
+      continue
+    assignment_map[name] = name
+    initialized_variable_names[name] = 1
+    initialized_variable_names[name + ":0"] = 1
 
-    dataset = dataset.apply(
-      tf.contrib.data.map_and_batch(
-        parser, batch_size=params["batch_size"],
-        num_parallel_batches=8,
-        drop_remainder=drop_reminder))
-    return dataset
-
-  return input_fn
+  return (assignment_map, initialized_variable_names)
 
 def make_input_fn(filename, is_training, drop_reminder):
   """Returns an `input_fn` for train and eval."""
@@ -65,6 +58,7 @@ def make_input_fn(filename, is_training, drop_reminder):
           features={
               "input": tf.io.FixedLenFeature([FLAGS.max_seq_length], tf.int64),
               "factors": tf.io.FixedLenFeature([FLAGS.num_factors, FLAGS.max_seq_length], tf.int64),
+              "products": tf.io.FixedLenFeature([FLAGS.num_items, FLAGS.num_factors], tf.int64),
               "is_real_example": tf.io.FixedLenFeature((), tf.int64),
           })
       
@@ -100,15 +94,19 @@ def model_fn_builder(init_checkpoint, learning_rate, num_train_steps, use_tpu):
 
     input = features["input"]
     factors = features["factors"]
-    factor_bin_sizes = np.asarray(params["factor_bin_sizes"].split(","))
+    factor_bin_sizes = np.asarray(params["factor_bin_sizes"].split(",")).astype('int32')
+    products = features["products"]
     is_real_example = features["is_real_example"]
 
     is_training = True if mode == tf.estimator.ModeKeys.TRAIN else False
+    predictive_position = 2 if mode == tf.estimator.ModeKeys.TRAIN else 1
 
     model = MfGAN(input,
       factors,
+      products,
       num_items=params["num_items"],
       factor_bin_sizes=factor_bin_sizes,
+      predictive_position=predictive_position,
       hidden_size=params["hidden_size"],
       generator_hidden_layers=params["generator_hidden_layers"],
       discriminator_hidden_layers=params["discriminator_hidden_layers"],
@@ -116,7 +114,6 @@ def model_fn_builder(init_checkpoint, learning_rate, num_train_steps, use_tpu):
       initializer_range=params["initializer_range"],
       activation_fn=tf.nn.relu,
       dropout_prob=params["dropout_prob"],
-      use_generator=params["use_generator"],
       is_training=is_training)
 
     if mode == tf.estimator.ModeKeys.TRAIN:
@@ -147,14 +144,12 @@ def model_fn_builder(init_checkpoint, learning_rate, num_train_steps, use_tpu):
 
       if params["training_task"] == "pretrain-generator":
 
-        #a_l = tf.Print(model.per_example_alignment_loss, [model.encoder_embedding], "_embeddings before grads", summarize=100)
-
         tvars = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "input_embeddings")
         tvars.extend(tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "input_positions"))
         tvars.extend(tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "generator_block"))
         tvars.extend(tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "prediction_layer"))
 
-        #log likelihood for multinomunal distribution. There is one item - next_item
+        #log likelihood for 1-Class network. There is one item - next_item. log_G is already masked with onehot label
         #[B, I] --> [B]
         per_example_loss = -tf.math.reduce_sum(model.log_G, axis=-1, keepdims=False)
         #[B] --> [1]
@@ -164,25 +159,42 @@ def model_fn_builder(init_checkpoint, learning_rate, num_train_steps, use_tpu):
 
         tvars = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "discriminator")
 
+        #cross entropy for bernoulli
         #[B] --> [B]
-        per_example_loss = -(is_real_example*tf.math.log(model.Q)+(1-is_real_example)*tf.math.log(1-model.Q))
+        per_example_loss = -(tf.cast(is_real_example, tf.float32)*tf.math.log(model.Input_item_Q)+(1-tf.cast(is_real_example, tf.float32))*tf.math.log(1-model.Input_item_Q))
         #[B] --> [1]
         total_loss = tf.reduce_mean(per_example_loss)
 
       elif params["training_task"] == "gan-generator":
 
-        tvars = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "discriminator")
+        tvars = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "input_embeddings")
+        tvars.extend(tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "input_positions"))
+        tvars.extend(tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "generator_block"))
+        tvars.extend(tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "prediction_layer"))
 
-        loss = model.Q
+        #log likelihood for 1-Class network. There is one item - next_item. log_G is already masked with onehot label
+        #[B, I] --> [B]
+        log_prob = tf.math.reduce_sum(model.log_G, axis=-1, keepdims=False)
+        #product of log_prob and rewards
+        #[B] * [B] --> [B]
+        per_example_loss = -log_prob * model.Generated_item_Q
+        #[B] --> [1]
+        total_loss = tf.reduce_mean(per_example_loss)
+
       elif params["training_task"] == "gan-discriminator":
 
         tvars = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "discriminator")
 
-        loss = model.Q
+        #[B] --> [B]
+        per_example_loss = -tf.math.log(model.Input_item_Q) - tf.math.log(1-model.Generated_item_Q)
+        #[B] --> [1]
+        total_loss = tf.reduce_mean(per_example_loss)
 
       else:
         print ('unknows training')
         sys.exit(1)
+
+      grads = tf.gradients(total_loss, tvars, name='gradients')
 
       #print ("all tvars")
       #for i, v in enumerate(tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES)):
@@ -191,8 +203,6 @@ def model_fn_builder(init_checkpoint, learning_rate, num_train_steps, use_tpu):
       #print ("selected tvars")
       for i, v in enumerate(tvars):
         tf.logging.info("{}: {}".format(i, v))
-
-      grads = tf.gradients(total_loss, tvars, name='gradients')
 
       #for index in range(len(grads)):
       #  if grads[index] is not None:
@@ -292,11 +302,6 @@ def main():
     }
   )
 
-  use_generator = True
-  if FLAGS.action == 'PREDICT':
-    if FLAGS.prediction_task == 'generate_samples':
-      use_generator = False
-
   estimator = tf.compat.v1.estimator.tpu.TPUEstimator(
     model_fn=model_fn_builder(FLAGS.init_checkpoint, FLAGS.learning_rate, FLAGS.num_train_steps, FLAGS.use_tpu),
     use_tpu=FLAGS.use_tpu,
@@ -314,16 +319,11 @@ def main():
         "initializer_range": FLAGS.initializer_range,
         "dropout_prob": FLAGS.dropout_prob,
         "use_tpu": FLAGS.use_tpu,
-        "use_generator": use_generator,
         "training_task": FLAGS.training_task
     })
 
   if FLAGS.action == 'TRAIN':
-    if FLAGS.training_task == "pretrain-discriminator":
-      training_files = FLAGS.train_file.split(",")
-      estimator.train(input_fn=make_input_fn(training_files, is_training=True, drop_reminder=True), max_steps=FLAGS.num_train_steps)
-    else:
-      estimator.train(input_fn=make_input_fn(FLAGS.train_file, is_training=True, drop_reminder=True), max_steps=FLAGS.num_train_steps)
+    estimator.train(input_fn=make_input_fn(FLAGS.train_file, is_training=True, drop_reminder=True), max_steps=FLAGS.num_train_steps)
   
   if FLAGS.action == 'EVALUATE':
     eval_drop_remainder = True if FLAGS.use_tpu else False
@@ -338,9 +338,10 @@ def main():
 
     if FLAGS.prediction_task == 'generate_samples':
       f = open("data/products.pkl", "rb")
-      products = pickle.load(f)
+      product_list = pickle.load(f)
 
-      #print (repr(products))
+      product_table = np.array(product_list)
+      #print (repr(product_list))
 
       with tf.io.TFRecordWriter(FLAGS.output_file) as writer:
         for prediction in results:
@@ -349,11 +350,11 @@ def main():
 
           sample_interaction = []
           for i in prediction["generated_sample"]:
-            sample_interaction.append((products[i][0], products[i][1], products[i][2]))
+            sample_interaction.append((product_list[i][0], product_list[i][1], product_list[i][2]))
 
           factors = np.array(sample_interaction).transpose([1, 0])
 
-          tf_example = audio_example(prediction["generated_sample"], factors, False)
+          tf_example = example(prediction["generated_sample"], factors, product_table, False)
 
           writer.write(tf_example.SerializeToString())
 
@@ -379,20 +380,20 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--output_dir', type=str, default='gs://recommender/mfgan/output',
+    parser.add_argument('--output_dir', type=str, default='gs://recsys_container/mfgan/output',
             help='Model directrory in google storage.')
     parser.add_argument('--init_checkpoint', type=str, default=None,
             help='This will be checkpoint from previous training phase.')
-    parser.add_argument('--train_file', type=str, default='gs://anomaly_detection/mtad_tf/data/train.tfrecords',
+    parser.add_argument('--train_file', type=str, default='gs://recsys_container/mfgan/data/train.tfrecords',
             help='Train file location in google storage.')
-    parser.add_argument('--test_file', type=str, default='gs://anomaly_detection/mtad_tf/data/test.tfrecords',
+    parser.add_argument('--test_file', type=str, default='gs://recsys_container/mfgan/data/test.tfrecords',
             help='Test file location in google storage.')
-    parser.add_argument('--output_file', type=str, default='gs://anomaly_detection/mtad_tf/data/output.tfrecords',
+    parser.add_argument('--output_file', type=str, default='gs://recsys_container/mfgan/data/output.tfrecords',
             help='Output file location in google storage.')
-    parser.add_argument('--dropout_prob', type=float, default=0.0,
+    parser.add_argument('--dropout_prob', type=float, default=0.2,
             help='This used for all dropouts.')
-    parser.add_argument('--num_train_steps', type=int, default=78000,
-            help='Number of steps to run trainer.')
+    parser.add_argument('--num_train_steps', type=int, default=10000,
+            help='Number of steps to run trainer. It is different for generator and descriminator and for pretraining and adversarial training.')
     parser.add_argument('--iterations_per_loop', type=int, default=1000,
             help='Number of iterations per TPU training loop.')
     parser.add_argument('--save_checkpoints_steps', type=int, default=1000,
@@ -401,8 +402,8 @@ if __name__ == '__main__':
             help='Number of step to write logs.')
     parser.add_argument('--keep_checkpoint_max', type=int, default=10,
             help='Number of tensorflow checkpoint to keep.')
-    parser.add_argument('--batch_size', type=int, default=32,
-            help='Batch size.')
+    parser.add_argument('--batch_size', type=int, default=128,
+            help='Batch size is 128 for generator and 16 for discriminator.')
     parser.add_argument('--dataset_reader_buffer_size', type=int, default=100,
             help='input pipeline is I/O bottlenecked, consider setting this parameter to a value 1-100 MBs.')
     parser.add_argument('--shuffle_buffer_size', type=int, default=24000,
@@ -434,16 +435,16 @@ if __name__ == '__main__':
     parser.add_argument('--restore', default=False, action='store_true',
             help='Restore last checkpoint.')
     parser.add_argument('--hidden_size', type=int, default=50,
-            help='dimension of each network in the Feed-Forward Transformer is all set to 768.')
+            help='item embedding and all factor embedding sizes is 50.')
     parser.add_argument('--generator_hidden_layers', type=int, default=2,
-            help='Feed-Forward  Transformer  contains  6  FFT  blocks.')
+            help='Two self-attention blocks for generator.')
     parser.add_argument('--discriminator_hidden_layers', type=int, default=1,
-            help='Feed-Forward  Transformer  contains  6  FFT  blocks.')
+            help='One self-attention block only.')
     parser.add_argument('--num_attention_heads', type=int, default=2,
             help='number of attention head is set to 2 in all FFT block.')
     parser.add_argument('--num_items', type=int, default=10482,
             help='Computer instance metrics.')
-    parser.add_argument('--factor_bin_sizes', type=str,
+    parser.add_argument('--factor_bin_sizes', type=str, default='',
             help='Computer instance metrics.')
     parser.add_argument('--max_seq_length', type=int, default=20,
             help='Computer instance metrics.')
