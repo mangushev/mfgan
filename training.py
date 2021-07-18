@@ -4,7 +4,7 @@
 #input buffer tuning
 
 import numpy as np
-np.set_printoptions(edgeitems=25, linewidth=10000, precision=4, suppress=True)
+np.set_printoptions(edgeitems=25, linewidth=10000, precision=12, suppress=True)
 
 import collections
 import re
@@ -251,12 +251,25 @@ def model_fn_builder(init_checkpoint, learning_rate, num_train_steps, use_tpu):
 #          scaffold_fn=None)
 
     else:
+      if params["prediction_task"] == "generate_samples":
+        spec = tf.compat.v1.estimator.tpu.TPUEstimatorSpec(
+          mode=mode,
+          predictions={'generated_sample': model.Generated_sample,
+                       'factors': factors
+                      })
 
-      spec = tf.compat.v1.estimator.tpu.TPUEstimatorSpec(
-        mode=mode,
-        predictions={'generated_sample': model.generated_sample,
-                     'factors': factors
-                    })
+      elif params["prediction_task"] == "EVALUATE":
+        spec = tf.compat.v1.estimator.tpu.TPUEstimatorSpec(
+          mode=mode,
+          predictions={'input': input,
+                       'generated_item': model.Generated_item
+                      })
+      else:
+        spec = tf.compat.v1.estimator.tpu.TPUEstimatorSpec(
+          mode=mode,
+          predictions={'generated_sample': model.Generated_sample,
+                       'factors': factors
+                      })
       return spec 
 
   return model_fn   
@@ -319,7 +332,8 @@ def main():
         "initializer_range": FLAGS.initializer_range,
         "dropout_prob": FLAGS.dropout_prob,
         "use_tpu": FLAGS.use_tpu,
-        "training_task": FLAGS.training_task
+        "training_task": FLAGS.training_task,
+        "prediction_task": FLAGS.prediction_task
     })
 
   if FLAGS.action == 'TRAIN':
@@ -359,22 +373,24 @@ def main():
           writer.write(tf_example.SerializeToString())
 
     elif FLAGS.prediction_task == 'EVALUATE':
-      labels = []
-      anomalies = []
+      correct = 0
+      total = 0
       for prediction in results:
-        labels.append(prediction["label"])
-        anomalies.append(prediction["predicted"])
-
-      metrics = calculate_metrics(anomalies, labels, True)
-
-      tf.logging.info("  %s = %s", "threshold", FLAGS.threshold)
-      for key in sorted(metrics.keys()):
-        tf.logging.info("  %s = %s", key, str(metrics[key]))
+        print ("> generated onehot item", prediction["generated_item"])
+        print ("input (last item is label)", prediction["input"])
+        top10 = np.argsort(prediction["generated_item"])[-10:]
+        top10_no_zero_probs = np.delete(top10, np.where(prediction["generated_item"][top10] < FLAGS.zero_probability))
+        print ("top 10 w/o zeros indeces: ", top10_no_zero_probs)
+        print ("top 10 w/o zeros probabilities: ", prediction["generated_item"][top10_no_zero_probs])
+        if prediction["input"][-1] in top10_no_zero_probs:
+          correct = correct + 1
+        total = total + 1
+      tf.logging.info("items correct %d items total %d top10 accuracy = %f", correct, total, correct / total)
     else:
-      output_predict_file = os.path.join("./", "Anomaly.csv")
+      output_predict_file = os.path.join("./", "output.csv")
       with tf.gfile.GFile(output_predict_file, "w") as writer:
         for prediction in results:
-          writer.write(str(prediction["anomaly"]) + "\n")
+          writer.write(str(prediction["generated_item"]) + "\n")
 
 if __name__ == '__main__':
 
@@ -430,7 +446,7 @@ if __name__ == '__main__':
             help='An action to execure.')
     parser.add_argument('--training_task', choices=['pretrain-generator', 'pretrain-discriminator', 'gan-generator', 'gan-discriminator'],
             help='Training phase.')
-    parser.add_argument('--prediction_task', default='next_item', choices=['generate_samples', 'next_item'],
+    parser.add_argument('--prediction_task', default='EVALUATE', choices=['generate_samples', 'EVALUATE'],
             help='Values to predict.')
     parser.add_argument('--restore', default=False, action='store_true',
             help='Restore last checkpoint.')
@@ -450,6 +466,8 @@ if __name__ == '__main__':
             help='Computer instance metrics.')
     parser.add_argument('--num_factors', type=int, default=3,
             help='Computer instance metrics.')
+    parser.add_argument('--zero_probability', type=float, default=1e-5,
+            help='Consider as zero probability in onehot predicted item.')
 
     FLAGS, unparsed = parser.parse_known_args()
 

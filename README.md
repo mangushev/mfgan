@@ -1,7 +1,7 @@
 # mfgan
 Implementation of MFGAN: Sequential Recommendation with Self-Attentive Multi-Adversarial Network
 
-This is a work in progress. It trains. I have not validatd all of this and have not built evaluation yet. 
+This is a work in progress. See TO-DO/Notes section.
 
 article: https://arxiv.org/abs/2005.10602
 
@@ -29,9 +29,9 @@ Training sequence is in the article:
 TO-DO and notices:
 
 - I don't get it why input sequence should be right aligned, why not to mask if input sequence is short
-- Training epochs in the article do not much how it actually takes. It is much less
-- Build evaluation/performance
-- I don't like how it converges! See graths.
+- Training epochs in the article do not much how long it actually takes to converge. It is much less
+- Accuracy from Evaluation is very high 0.994343. I think one of the things that training and evaluation are intersect. We use a item one before the last for training purpose and we use the very last for evaluation. I saw in other papers, sets are completely separate. Also, we are just prediction a next item, instead I saw somewhere that several items can be predicted in sequense which will increae challenge. 
+- TO-DO: Build a prediction output
 
 Training steps:
 
@@ -99,3 +99,14 @@ step 2
 python training.py --batch_size=128 --save_checkpoints_steps=1000 --action=TRAIN --training_task=gan-generator --learning_rate=0.0002 --train_file=gs://recsys_container/mfgan/data/train.tfrecords --keep_checkpoint_max=200 --factor_bin_sizes=19,6,6765 --output_dir='gs://recsys_container/mfgan/output/gan-generator-2' --init_checkpoint='gs://recsys_container/mfgan/output/gan-discriminator-1' --num_train_steps=508500
 
 python training.py --batch_size=16 --save_checkpoints_steps=1000 --action=TRAIN --training_task=gan-discriminator --clip_gradients=1.0 --learning_rate=0.0002 --train_file=gs://recsys_container/mfgan/data/train.tfrecords --keep_checkpoint_max=200 --factor_bin_sizes=19,6,6765 --output_dir='gs://recsys_container/mfgan/output/gan-discriminator-2' --init_checkpoint='gs://recsys_container/mfgan/output/gan-generator-2' --num_train_steps=40682
+
+
+Evaluation
+
+I evaluate on Top 10 metric only. Prediction output is onehot. 10 top probabilities are taken instead of just the top 1. If any of these top 10 match actual label, it is considered a hit. Label is the last item in an input sequence.
+
+time python training.py --batch_size=128 --action=PREDICT --prediction_task=EVALUATE --test_file=data/train.tfrecords --factor_bin_sizes=19,6,6765 --output_dir='gs://recsys_container/mfgan/output/gan-generator-1'
+
+output:
+
+2021-07-18 20:44:09,334 INFO items correct 323617 items total 325458 top10 accuracy = 0.994343

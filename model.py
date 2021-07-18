@@ -732,17 +732,17 @@ class MfGAN(object):
       #[B, n, d] --> [B, d]
       new_item  = self._generator_tensor[:,-predictive_position,:]
       #[B, d] . [I, d]T --> [B, I] - this is onehot for next item
-      next_item = tf.nn.softmax(tf.matmul(new_item, self._generator_embedding_table, transpose_b=True, name='next_item'))
+      self._generated_item = tf.nn.softmax(tf.matmul(new_item, self._generator_embedding_table, transpose_b=True, name='next_item'))
 
       #[B, n, I] --> [B, n, I]
       self._generated_sample = tf.cond(tf.math.equal(predictive_position, 2), 
-        lambda: tf.concat([input_tensor[:,:-2,:], tf.expand_dims(next_item, axis=1), input_tensor[:,-1:,:]], axis=1),
-        lambda: tf.concat([input_tensor[:,:-1,:], tf.expand_dims(next_item, axis=1)], axis=1))
+        lambda: tf.concat([input_tensor[:,:-2,:], tf.expand_dims(self._generated_item, axis=1), input_tensor[:,-1:,:]], axis=1),
+        lambda: tf.concat([input_tensor[:,:-1,:], tf.expand_dims(self._generated_item, axis=1)], axis=1))
 
     #6) Factors loop and Q function, lambda = 0 --> taking mean of factors
     with tf.compat.v1.variable_scope("discriminator"):
       #[B, I] --> [B, 1]
-      next_item_dense = tf.expand_dims(tf.argmax(next_item, axis=1), axis=-1)
+      next_item_dense = tf.expand_dims(tf.argmax(self._generated_item, axis=1), axis=-1)
 
       #[B, I, f], [B, 1] --> [B, 1, f]
       next_factors = tf.gather(products, next_item_dense, axis=1, batch_dims=1, name="next_factors")
@@ -765,10 +765,14 @@ class MfGAN(object):
     #7) log G to calculate gradients
     #[B, I]
     # mask all except one by multiplying on onehot label
-    self._log_G = tf.math.log(next_item)*input_tensor[:,-2,:]
+    self._log_G = tf.math.log(self._generated_item)*input_tensor[:,-2,:]
 
   @property
-  def generated_sample(self):
+  def Generated_item(self):
+    return self._generated_item
+
+  @property
+  def Generated_sample(self):
     return tf.argmax(self._generated_sample, axis=2)
 
   @property
