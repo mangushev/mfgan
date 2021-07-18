@@ -2,9 +2,10 @@
 
 Please visit <a href="https://github.com/mangushev/mfgan">repository</a> to review sources.
 
+
 Implementation of MFGAN: Sequential Recommendation with Self-Attentive Multi-Adversarial Network
 
-This is a work in progress. See TO-DO/Notes section.
+I am validating all of this. See TO-DO/Notes section.
 
 article: https://arxiv.org/abs/2005.10602
 
@@ -33,8 +34,9 @@ TO-DO and notices:
 
 - I don't get it why input sequence should be right aligned, why not to mask if input sequence is short
 - Training epochs in the article do not much how long it actually takes to converge. It is much less
-- Accuracy from Evaluation is very high 0.994343. I think one of the things that training and evaluation are intersect. We use a item one before the last for training purpose and we use the very last for evaluation. I saw in other papers, sets are completely separate. Also, we are just prediction a next item, instead I saw somewhere that several items can be predicted in sequense which will increae challenge. 
-- TO-DO: Build a prediction output
+- Accuracy from Evaluation is very high 0.994343. I think one of the things that training and evaluation data are intersected. We use an item one before the last for training purpose and we use the very last item for evaluation. I saw in other papers, sets are completely separate. Also, we are just predicting next item, instead I saw somewhere that several items are predicted in a sequense which will increae challenge. 
+- TODO: Build a prediction output
+- TODO: Add category factor
 
 Training steps:
 
