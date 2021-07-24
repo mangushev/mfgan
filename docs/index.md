@@ -116,7 +116,7 @@ output:
 
 Prediction
 
-It runs similar to evaluation. I do not do this, but input data must form input with extra position at the end like: ACTUAL DATA + 1 taking into account max sequence length. Tis is because of transformer output with input length equal to the putput. Generator transformer masks last position. Output is onehot. I produce a sorted from high to low top 10 for each output. There is a parameter to suppress items if probability in those top 10 actually extremely low. They have no value, customer is not really interested in those.CVS output looks like this:
+It runs similar to evaluation. I do not do this, but input data must form input with extra position at the end like: ACTUAL DATA + 1 taking into account max sequence length. This is because of transformer output with input length equal to the transformer output. Generator transformer masks last position. Output is onehot. I produce a sorted from high to low top 10 probabilities for each output. There is a parameter to suppress items if probability in those top 10 actually extremely low. They have no value, customer is not really interested in those. CVS output looks like this:
 
 4687
 6009,6329,10076,8385,3677,7131,3659,2008,8701,3873
