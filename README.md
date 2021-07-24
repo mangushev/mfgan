@@ -1,8 +1,6 @@
 # mfgan
 Implementation of MFGAN: Sequential Recommendation with Self-Attentive Multi-Adversarial Network
 
-I am validating all of this. See TO-DO/Notes section.
-
 article: https://arxiv.org/abs/2005.10602
 
 Other papers:
@@ -26,13 +24,12 @@ Training sequence is in the article:
 - pretrain discriminator on binary cross entropy
 - train generator and discriminator in a loop
 
-TO-DO and notices:
+Notes:
 
 - I don't get it why input sequence should be right aligned, why not to mask if input sequence is short
 - Training epochs in the article do not much how long it actually takes to converge. It is much less
 - Accuracy from Evaluation is very high 0.994343. I think one of the things that training and evaluation data are intersected. We use an item one before the last for training purpose and we use the very last item for evaluation. I saw in other papers, sets are completely separate. Also, we are just predicting next item, instead I saw somewhere that several items are predicted in a sequense which will increae challenge. 
-- TODO: Build a prediction output
-- TODO: Add category factor
+- I didn't use category factor
 
 Training steps:
 
@@ -111,3 +108,19 @@ time python training.py --batch_size=128 --action=PREDICT --prediction_task=EVAL
 output:
 
 2021-07-18 20:44:09,334 INFO items correct 323617 items total 325458 top10 accuracy = 0.994343
+
+
+Prediction
+
+It runs similar to evaluation. I do not do this, but input data must form input with extra position at the end like: ACTUAL DATA + 1 taking into account max sequence length. Tis is because of transformer output with input length equal to the putput. Generator transformer masks last position. Output is onehot. I produce a sorted from high to low top 10 for each output. There is a parameter to suppress items if probability in those top 10 actually extremely low. They have no value, customer is not really interested in those.CVS output looks like this:
+
+4687
+6009,6329,10076,8385,3677,7131,3659,2008,8701,3873
+4687
+4687
+7351,2160,6105,9685,2361,9618,8941,6880,6160,10349
+1220
+3106,257
+4915
+4666
+

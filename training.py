@@ -267,8 +267,7 @@ def model_fn_builder(init_checkpoint, learning_rate, num_train_steps, use_tpu):
       else:
         spec = tf.compat.v1.estimator.tpu.TPUEstimatorSpec(
           mode=mode,
-          predictions={'generated_sample': model.Generated_sample,
-                       'factors': factors
+          predictions={'generated_item': model.Generated_item
                       })
       return spec 
 
@@ -387,10 +386,11 @@ def main():
         total = total + 1
       tf.logging.info("items correct %d items total %d top10 accuracy = %f", correct, total, correct / total)
     else:
-      output_predict_file = os.path.join("./", "output.csv")
-      with tf.gfile.GFile(output_predict_file, "w") as writer:
+      with tf.gfile.GFile(FLAGS.output_file, "w") as writer:
         for prediction in results:
-          writer.write(str(prediction["generated_item"]) + "\n")
+          top10 = np.argsort(prediction["generated_item"])[-10:]
+          top10_no_zero_probs = np.delete(top10, np.where(prediction["generated_item"][top10] < FLAGS.zero_probability))
+          writer.write(','.join(top10_no_zero_probs.astype(str)) + "\n")
 
 if __name__ == '__main__':
 
@@ -446,7 +446,7 @@ if __name__ == '__main__':
             help='An action to execure.')
     parser.add_argument('--training_task', choices=['pretrain-generator', 'pretrain-discriminator', 'gan-generator', 'gan-discriminator'],
             help='Training phase.')
-    parser.add_argument('--prediction_task', default='EVALUATE', choices=['generate_samples', 'EVALUATE'],
+    parser.add_argument('--prediction_task', default='', choices=['generate_samples', 'EVALUATE'],
             help='Values to predict.')
     parser.add_argument('--restore', default=False, action='store_true',
             help='Restore last checkpoint.')
